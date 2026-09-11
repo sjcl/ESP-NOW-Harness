@@ -14,4 +14,5 @@ encryption = false
 [traffic]
 mode = "saturation"
 streams = 1
+tx_window = 8
 packet_size = 250

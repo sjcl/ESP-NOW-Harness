@@ -14,6 +14,7 @@ encryption = false
 [traffic]
 mode = "latency-under-load"
 streams = 1
+tx_window = 1
 packet_size = 64
 probe_rate = 100
 background_packet_size = 250

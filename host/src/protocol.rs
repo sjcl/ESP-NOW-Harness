@@ -74,9 +74,15 @@ pub struct Command<'a, T: Serialize> {
 pub struct Capabilities {
     pub max_packet_size: u16,
     pub max_streams: u16,
+    #[serde(default = "default_max_tx_window")]
+    pub max_tx_window: u16,
     pub bands: Vec<String>,
     pub phy_rates: Vec<String>,
     pub encryption: bool,
+}
+
+fn default_max_tx_window() -> u16 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

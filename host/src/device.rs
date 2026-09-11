@@ -140,6 +140,7 @@ fn placeholder_info() -> Info {
         capabilities: crate::protocol::Capabilities {
             max_packet_size: 0,
             max_streams: 0,
+            max_tx_window: 1,
             bands: vec![],
             phy_rates: vec![],
             encryption: false,

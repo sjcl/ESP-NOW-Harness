@@ -39,9 +39,11 @@ stream_id:u16 | packet_len:u16 | seq:u32 | timestamp_us:u64
 
 RX/TX callbacks only capture `esp_timer_get_time()`, RSSI, completion status and a bounded frame copy into a statically allocated FreeRTOS queue. Parsing, echo, sequence tracking, statistics and JSON occur in lower-priority tasks. There is no per-packet logging and no heap allocation in the measurement send/receive path.
 
-The generator uses absolute deadlines (`start + index * 1_000_000 / rate`) so delay does not accumulate. It sleeps for the coarse part and uses a short microsecond delay only near the deadline. Streams are round-robin interleaved. Saturation keeps one ESP-NOW send outstanding and proceeds on send completion, matching Espressif's ordering guidance and avoiding an unbounded driver queue.
+The generator uses absolute deadlines (`start + index * 1_000_000 / rate`) so delay does not accumulate. It sleeps for the coarse part and uses a short microsecond delay only near the deadline. Streams are round-robin interleaved. `traffic.tx_window` is a bounded count of submitted frames whose send callbacks have not yet arrived (valid range 1–32). `tx_window = 1` is the conservative completion-serialized baseline; larger windows allow saturation tests to exercise driver/radio capacity without creating an unbounded queue. The supplied throughput scenario uses 8.
 
-RTT uses only the initiator's `esp_timer` clock: its timestamp is echoed unchanged. Up to 8192 RTT samples are retained. Beyond that, deterministic bounded reservoir replacement is used. Percentiles are nearest-rank estimates over the reservoir; exact min/max, count, mean and standard deviation are accumulated over all samples. Jitter is reported as mean/max absolute difference between consecutive RTT samples. One-way latency is intentionally not reported.
+For deadline-driven modes, `dispatch_lateness_us = actual_dispatch - scheduled_deadline` is sampled after a TX-window slot is acquired as the packet enters the final encode/send path. It exposes scheduler or queueing delay that RTT intentionally does not include. Saturation has no requested deadline, so its lateness sample count is zero.
+
+RTT uses only the initiator's `esp_timer` clock: its dispatch timestamp is echoed unchanged. Up to 8192 RTT and 8192 dispatch-lateness samples are retained independently. Beyond that, deterministic bounded reservoir replacement is used. Percentiles use standard nearest-rank: rank `ceil(q × N)`, followed by zero-based index `rank - 1`. Exact min/max, count, mean and standard deviation are accumulated over all samples. Jitter is reported as mean/max absolute difference between consecutive RTT samples. One-way latency is intentionally not reported.
 
 Sequence detection uses a 64-packet sliding bitmap per stream. It detects recent duplicates and reordering; packets arriving more than 63 behind the current highest sequence are conservatively classified out-of-order. Host aggregate loss uses submitted TX versus unique RX, which also captures trailing loss that receiver-side gap counting cannot infer.
 
@@ -124,6 +126,8 @@ If exactly two harness nodes are connected, the `--node-a/--node-b` arguments ma
 
 See [`scenarios/`](scenarios). Unknown TOML fields are rejected. `duration` accepts values such as `500ms`, `10s`, or `2m`. `radio.country` is a two-letter uppercase ISO country code and is part of saved reproducibility metadata. Valid modes are `ping`, `stream`, `multi-stream`, `saturation`, and `latency-under-load`. v1 exposes these PHY labels: `1m` (2.4 GHz only), `6m`, `24m`, `54m`, `mcs0`, `mcs7`, `he-mcs0`, `he-mcs7`.
 
+`traffic.tx_window` defaults to 1 and accepts 1–32. Keep it at 1 for the lowest-queueing baseline, then compare 2/4/8/... for throughput. Record it with every result; values should not be compared as if they were the same radio condition.
+
 For encryption, add `key = "00112233445566778899aabbccddeeff"`; it is used as the shared 16-byte PMK and LMK in this two-node benchmark. Do not reuse a production secret in result-producing experiments.
 
 `latency-under-load.toml` uses stream 15 for probes and streams 0–14 for background. Its 1000 × 250-byte frames/s request 2 Mbit/s of application traffic. Requested bandwidth excludes Wi-Fi/ESP-NOW overhead.
@@ -154,17 +158,18 @@ results/2026-09-12T001234Z-basic/
   summary.csv
 ```
 
-Metadata includes host/firmware/IDF versions, optional Git commit, node MAC/capabilities, full radio/scenario configuration, start time and requested duration. JSON retains per-node/per-stream counters, RSSI histogram (-127 through 0 dBm), RTT distribution and aggregate cross-node loss. CSV flattens scalar fields for comparison.
+Metadata includes host/firmware/IDF versions, optional Git commit, node MAC/capabilities, full radio/scenario configuration, start time and requested duration. JSON retains per-node/per-stream counters, RSSI histogram (-127 through 0 dBm), RTT and dispatch-lateness distributions, first/last TX/RX timestamps, active windows, and aggregate cross-node loss. CSV flattens scalar fields for comparison.
 
 - RTT is A→B→A application echo time, not one-way delay. p99 means 99% of retained RTT samples are at or below that value; inspect p99.9/max for tracking-relevant stalls.
+- Dispatch lateness is time spent past the packet's absolute schedule before entering the send path, including waiting for a TX-window slot. Inspect it alongside RTT; low RTT does not imply on-time generation.
 - Packet loss is submitted frames minus unique received frames. Send callback success is MAC-layer delivery, not proof that the application processed the frame.
-- Goodput is received benchmark application bytes per second, including the 28-byte harness header but excluding ESP-NOW/Wi-Fi overhead.
+- Goodput is received benchmark application bytes per second, including the 28-byte harness header but excluding ESP-NOW/Wi-Fi overhead. Per-node `goodput_bps_active` uses B's first-to-last RX window; aggregate `rx_goodput_bps_tx_window` divides B's received bytes by A's first-to-last successful dispatch window, avoiding serial start/stop skew. A single-packet run has no measurable active window and reports zero.
 - RSSI is per received ESP-NOW frame. Compare distributions, not only the mean.
 - Requested PPS and achieved TX/RX PPS differ when airtime, completion serialization, CPU load, or the driver limits the run.
 
 ## Current scope and extension points
 
-Implemented: identical configurable firmware; 16 logical streams; ping, constant-rate stream, interleaved multi-stream, completion-limited saturation, latency-under-load; radio band/channel/rate/power/power-save/encryption configuration; bounded metrics; discovery/orchestration; JSON/CSV/human results; protocol/scenario/sequence/percentile/serialization tests.
+Implemented: identical configurable firmware; 16 logical streams; ping, constant-rate stream, interleaved multi-stream, bounded-window saturation, latency-under-load; configurable 1–32 frame TX window; radio band/channel/rate/power/power-save/encryption configuration; bounded RTT/lateness metrics; active RX and host-aligned goodput windows; discovery/orchestration; JSON/CSV/human results; protocol/scenario/sequence/percentile/serialization tests.
 
 Not implemented in v1: trace replay, synchronized one-way latency, GPIO sync, 3+ node orchestration, automatic sweeps, GUI/graphs. A future trace-driven generator should emit the same `{deadline, packet_size, stream_id, type}` scheduling items as the constant-rate generator; no wire-format change is required. A future protocol version can add clock-domain and sync metadata without reinterpreting the v1 timestamp.
 

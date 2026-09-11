@@ -15,5 +15,6 @@ encryption = false
 [traffic]
 mode = "multi-stream"
 streams = 12
+tx_window = 1
 packet_size = 64
 packet_rate_per_stream = 300

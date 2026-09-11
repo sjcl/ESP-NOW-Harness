@@ -12,12 +12,15 @@
 
 static SemaphoreHandle_t tx_ready;
 static StaticSemaphore_t tx_ready_storage;
+static uint16_t current_tx_window = 1;
 
 static void tx_callback(const esp_now_send_info_t *info, esp_now_send_status_t status)
 {
     (void)info;
-    xSemaphoreGive(tx_ready);
     receiver_post_tx(status == ESP_NOW_SEND_SUCCESS);
+    /* Publishing the completion event before the slot makes radio_wait_idle()
+       a reliable fence for all prior callback metrics. */
+    xSemaphoreGive(tx_ready);
 }
 
 static void rx_callback(const esp_now_recv_info_t *info, const uint8_t *data, int length)
@@ -42,8 +45,7 @@ esp_err_t radio_init(void)
     if ((error = esp_wifi_start()) != ESP_OK) return error;
     if ((error = esp_wifi_set_ps(WIFI_PS_NONE)) != ESP_OK) return error;
     if ((error = esp_now_init()) != ESP_OK) return error;
-    tx_ready = xSemaphoreCreateBinaryStatic(&tx_ready_storage);
-    xSemaphoreGive(tx_ready);
+    tx_ready = xSemaphoreCreateCountingStatic(HARNESS_MAX_TX_WINDOW, 1, &tx_ready_storage);
     if ((error = esp_now_register_send_cb(tx_callback)) != ESP_OK) return error;
     return esp_now_register_recv_cb(rx_callback);
 }
@@ -75,11 +77,18 @@ static bool make_rate_config(const harness_config_t *config, esp_now_rate_config
 
 esp_err_t radio_configure(const harness_config_t *config)
 {
+    esp_err_t error = radio_wait_idle(1000);
+    if (error != ESP_OK) return error;
+    for (uint16_t i = 0; i < current_tx_window; ++i) {
+        if (xSemaphoreTake(tx_ready, 0) != pdTRUE) return ESP_ERR_INVALID_STATE;
+    }
+    current_tx_window = config->tx_window;
+    for (uint16_t i = 0; i < current_tx_window; ++i) xSemaphoreGive(tx_ready);
     esp_now_peer_info_t existing;
     while (esp_now_fetch_peer(true, &existing) == ESP_OK) {
         esp_now_del_peer(existing.peer_addr);
     }
-    esp_err_t error = esp_wifi_set_country_code(config->country, false);
+    error = esp_wifi_set_country_code(config->country, false);
     if (error != ESP_OK) return error;
     error = esp_wifi_set_band_mode(config->band_5ghz ? WIFI_BAND_MODE_5G_ONLY : WIFI_BAND_MODE_2G_ONLY);
     if (error != ESP_OK) return error;
@@ -105,8 +114,41 @@ esp_err_t radio_configure(const harness_config_t *config)
 
 esp_err_t radio_send(const uint8_t *data, size_t length, uint32_t timeout_ms)
 {
-    if (xSemaphoreTake(tx_ready, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) return ESP_ERR_TIMEOUT;
+    esp_err_t error = radio_acquire_tx(timeout_ms);
+    if (error != ESP_OK) return error;
+    return radio_send_acquired(data, length);
+}
+
+esp_err_t radio_acquire_tx(uint32_t timeout_ms)
+{
+    return xSemaphoreTake(tx_ready, pdMS_TO_TICKS(timeout_ms)) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+esp_err_t radio_send_acquired(const uint8_t *data, size_t length)
+{
     esp_err_t error = esp_now_send(g_config.peer_mac, data, length);
     if (error != ESP_OK) xSemaphoreGive(tx_ready);
     return error;
+}
+
+void radio_release_tx(void)
+{
+    xSemaphoreGive(tx_ready);
+}
+
+esp_err_t radio_wait_idle(uint32_t timeout_ms)
+{
+    uint16_t acquired = 0;
+    while (acquired < current_tx_window) {
+        if (xSemaphoreTake(tx_ready, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+            while (acquired > 0) {
+                xSemaphoreGive(tx_ready);
+                acquired--;
+            }
+            return ESP_ERR_TIMEOUT;
+        }
+        acquired++;
+    }
+    for (uint16_t i = 0; i < acquired; ++i) xSemaphoreGive(tx_ready);
+    return ESP_OK;
 }

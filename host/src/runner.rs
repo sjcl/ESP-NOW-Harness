@@ -39,6 +39,15 @@ pub fn run(
     }
     let mut a = Device::open(&ap, baud)?;
     let mut b = Device::open(&bp, baud)?;
+    for (label, device) in [("A", &a), ("B", &b)] {
+        if s.traffic.tx_window > device.info.capabilities.max_tx_window {
+            bail!(
+                "node {label} supports tx_window <= {}, scenario requests {}",
+                device.info.capabilities.max_tx_window,
+                s.traffic.tx_window
+            );
+        }
+    }
     let a_boot = a.info.boot_id;
     let b_boot = b.info.boot_id;
     let run_id = unique_run_id();

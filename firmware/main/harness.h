@@ -3,10 +3,11 @@
 #include <stdint.h>
 
 #define HARNESS_CONTROL_VERSION 1
-#define HARNESS_FW_VERSION "0.1.0"
+#define HARNESS_FW_VERSION "0.2.0"
 #define HARNESS_MAX_STREAMS 16
 #define HARNESS_MAX_PACKET_SIZE 250
 #define HARNESS_KEY_SIZE 16
+#define HARNESS_MAX_TX_WINDOW 32
 
 typedef enum { STATE_BOOT, STATE_IDLE, STATE_CONFIGURED, STATE_ARMED, STATE_RUNNING, STATE_FINISHED, STATE_ERROR } harness_state_t;
 typedef enum { ROLE_NONE, ROLE_GENERATOR, ROLE_SINK, ROLE_PING_INITIATOR, ROLE_ECHO_RESPONDER } harness_role_t;
@@ -28,6 +29,7 @@ typedef struct {
     uint64_t duration_us;
     uint16_t packet_size;
     uint16_t streams;
+    uint16_t tx_window;
     uint32_t rate_per_stream;
     uint32_t probe_rate;
     uint16_t background_packet_size;

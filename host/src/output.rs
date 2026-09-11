@@ -30,8 +30,8 @@ pub fn percentile(samples: &mut [u64], q: f64) -> u64 {
         return 0;
     }
     samples.sort_unstable();
-    let i = ((samples.len() - 1) as f64 * q).ceil() as usize;
-    samples[i.min(samples.len() - 1)]
+    let rank = (samples.len() as f64 * q).ceil().max(1.0) as usize;
+    samples[(rank - 1).min(samples.len() - 1)]
 }
 #[allow(dead_code)]
 pub fn summarize_samples(samples: &[u64]) -> Percentiles {
@@ -126,6 +126,19 @@ pub fn save(
         .unwrap_or(0);
     let unique_rx = rx.saturating_sub(dup);
     let loss = tx.saturating_sub(unique_rx);
+    let rx_bytes = b_result
+        .pointer("/totals/rx_bytes")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let tx_window_us = a_result
+        .pointer("/totals/tx_window_us")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let rx_goodput_bps_tx_window = if tx_window_us > 0 {
+        rx_bytes as f64 * 8_000_000.0 / tx_window_us as f64
+    } else {
+        0.0
+    };
     let rtt = a_result
         .pointer("/rtt/sample_count")
         .and_then(|v| v.as_u64())
@@ -145,7 +158,7 @@ pub fn save(
         .and_then(|s| s.get("tx_packets"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    let aggregate = serde_json::json!({"tx_packets":tx,"unique_rx_packets":unique_rx,"forward_packet_loss":loss,"forward_packet_loss_percent":if tx>0{loss as f64*100.0/tx as f64}else{0.0},"rtt_probes_sent":probe_tx,"completed_rtt_probes":rtt,"rtt_probe_loss":probe_tx.saturating_sub(rtt)});
+    let aggregate = serde_json::json!({"tx_packets":tx,"unique_rx_packets":unique_rx,"forward_packet_loss":loss,"forward_packet_loss_percent":if tx>0{loss as f64*100.0/tx as f64}else{0.0},"rx_goodput_bps_tx_window":rx_goodput_bps_tx_window,"tx_window_us":tx_window_us,"rtt_probes_sent":probe_tx,"completed_rtt_probes":rtt,"rtt_probe_loss":probe_tx.saturating_sub(rtt)});
     let combined = serde_json::json!({"protocol_version":1,"aggregate":aggregate,"node_a":a_result,"node_b":b_result});
     fs::write(
         dir.join("result.json"),
@@ -159,7 +172,7 @@ pub fn save(
     w.flush()?;
     println!("run '{}' complete", scenario.name);
     println!(
-        "aggregate: tx={} unique_rx={} forward_loss={} ({:.3}%)",
+        "aggregate: tx={} unique_rx={} forward_loss={} ({:.3}%) aligned_rx_goodput={:.0} bps",
         tx,
         unique_rx,
         loss,
@@ -167,7 +180,8 @@ pub fn save(
             loss as f64 * 100.0 / tx as f64
         } else {
             0.0
-        }
+        },
+        rx_goodput_bps_tx_window
     );
     print_summary("A", a_result);
     print_summary("B", b_result);
@@ -202,13 +216,15 @@ fn flatten_csv(
 fn print_summary(node: &str, v: &serde_json::Value) {
     let g = |k| v.pointer(k).cloned().unwrap_or(serde_json::Value::Null);
     println!(
-        "node {node}: tx={} rx={} loss={} send_fail={} rssi_mean={} dBm p99={} us",
+        "node {node}: tx={} rx={} loss={} send_fail={} rssi_mean={} dBm rtt_p99={} us dispatch_lateness_p99={} us active_rx_goodput={} bps",
         g("/totals/tx_submitted"),
         g("/totals/rx_packets"),
         g("/totals/estimated_loss"),
         g("/totals/send_cb_failure"),
         g("/rssi/mean"),
-        g("/rtt/p99_us")
+        g("/rtt/p99_us"),
+        g("/dispatch_lateness/p99_us"),
+        g("/totals/goodput_bps_active")
     );
 }
 
@@ -221,7 +237,7 @@ mod tests {
         let p = summarize_samples(&s);
         assert_eq!(
             (p.p50_us, p.p99_us, p.p999_us, p.max_us),
-            (501, 991, 1000, 1000)
+            (500, 990, 999, 1000)
         );
     }
     #[test]

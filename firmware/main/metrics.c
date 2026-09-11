@@ -1,24 +1,265 @@
 #include "metrics.h"
-#include "protocol.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+
 metrics_t g_metrics;
-void metrics_reset(void){memset(&g_metrics,0,sizeof(g_metrics));g_metrics.rssi_min=127;g_metrics.rssi_max=-127;g_metrics.rtt_min=UINT32_MAX;}
-void metrics_tx_requested(uint16_t s){__atomic_fetch_add(&g_metrics.totals.tx_requested,1,__ATOMIC_RELAXED);if(s<HARNESS_MAX_STREAMS)__atomic_fetch_add(&g_metrics.streams[s].tx,1,__ATOMIC_RELAXED);}
-void metrics_tx_submitted(uint16_t s,uint16_t len){(void)s;__atomic_fetch_add(&g_metrics.totals.tx_submitted,1,__ATOMIC_RELAXED);__atomic_fetch_add(&g_metrics.totals.tx_bytes,len,__ATOMIC_RELAXED);}
-void metrics_tx_api_failure(void){__atomic_fetch_add(&g_metrics.totals.send_api_failure,1,__ATOMIC_RELAXED);}
-void metrics_tx_complete(bool ok){if(ok)g_metrics.totals.send_cb_success++;else g_metrics.totals.send_cb_failure++;}
-static void seq_observe(stream_metric_t*m,uint32_t seq){m->rx++;if(!m->init){m->init=true;m->highest=seq;m->bitmap=1;if(seq)m->gaps+=seq;return;}if(seq>m->highest){uint32_t d=seq-m->highest;if(d>1)m->gaps+=(uint64_t)d-1;m->bitmap=d>=64?1:(m->bitmap<<d)|1;m->highest=seq;}else{uint32_t d=m->highest-seq;if(d>=64){m->out_of_order++;return;}uint64_t bit=UINT64_C(1)<<d;if(m->bitmap&bit){m->duplicate++;return;}m->bitmap|=bit;m->out_of_order++;if(m->gaps) m->gaps--;}}
-void metrics_rx(const bench_header_t*h,int8_t rssi,uint64_t now){g_metrics.totals.rx_packets++;g_metrics.totals.rx_bytes+=h->packet_len;stream_metric_t*m=&g_metrics.streams[h->stream_id];uint64_t od=m->out_of_order,du=m->duplicate;seq_observe(m,h->seq);g_metrics.totals.out_of_order+=m->out_of_order-od;g_metrics.totals.duplicate+=m->duplicate-du;g_metrics.rssi_count++;g_metrics.rssi_sum+=rssi;if(rssi<g_metrics.rssi_min)g_metrics.rssi_min=rssi;if(rssi>g_metrics.rssi_max)g_metrics.rssi_max=rssi;int idx=rssi+127;if(idx<0)idx=0;if(idx>127)idx=127;g_metrics.rssi_hist[idx]++;if(h->type==PACKET_ECHO&&now>=h->timestamp_us){uint64_t r=now-h->timestamp_us;if(r>UINT32_MAX)r=UINT32_MAX;uint32_t v=(uint32_t)r;if(g_metrics.rtt_seen){uint32_t j=v>g_metrics.last_rtt?v-g_metrics.last_rtt:g_metrics.last_rtt-v;g_metrics.jitter_sum+=j;g_metrics.jitter_count++;if(j>g_metrics.jitter_max)g_metrics.jitter_max=j;}g_metrics.last_rtt=v;g_metrics.rtt_seen++;g_metrics.rtt_sum+=v;g_metrics.rtt_sum_sq+=(long double)v*v;if(v<g_metrics.rtt_min)g_metrics.rtt_min=v;if(v>g_metrics.rtt_max)g_metrics.rtt_max=v;if(g_metrics.rtt_count<RTT_CAPACITY)g_metrics.rtt[g_metrics.rtt_count++]=v;else{uint64_t slot=(h->seq*UINT64_C(2654435761)+h->stream_id)%g_metrics.rtt_seen;if(slot<RTT_CAPACITY)g_metrics.rtt[slot]=v;}}}
-void metrics_drop(bool stale,bool invalid){if(stale)g_metrics.totals.stale++;if(invalid)g_metrics.totals.invalid++;}
-static int cmp32(const void*a,const void*b){uint32_t x=*(const uint32_t*)a,y=*(const uint32_t*)b;return(x>y)-(x<y);}static uint32_t pct(double q){if(!g_metrics.rtt_count)return 0;size_t i=(size_t)ceil((g_metrics.rtt_count-1)*q);return g_metrics.rtt[i];}
-static void u64(cJSON*o,const char*k,uint64_t v){cJSON_AddNumberToObject(o,k,(double)v);}cJSON*metrics_json(void){qsort(g_metrics.rtt,g_metrics.rtt_count,sizeof(uint32_t),cmp32);cJSON*r=cJSON_CreateObject(),*t=cJSON_AddObjectToObject(r,"totals");uint64_t gaps=0;for(int i=0;i<HARNESS_MAX_STREAMS;i++)gaps+=g_metrics.streams[i].gaps;g_metrics.totals.estimated_loss=gaps;
-#define A(x) u64(t,#x,g_metrics.totals.x)
-A(tx_requested);A(tx_submitted);A(tx_bytes);A(send_cb_success);A(send_cb_failure);A(send_api_failure);A(rx_packets);A(rx_bytes);A(duplicate);A(out_of_order);A(estimated_loss);A(stale);A(invalid);A(queue_drops);
-#undef A
-uint64_t elapsed=g_metrics.end_us>g_metrics.start_us?g_metrics.end_us-g_metrics.start_us:0;uint64_t requested_pps=g_config.mode==MODE_SATURATION?0:(g_config.mode==MODE_LATENCY_LOAD?(uint64_t)g_config.background_rate+g_config.probe_rate:(uint64_t)g_config.rate_per_stream*g_config.streams);cJSON_AddNumberToObject(t,"elapsed_us",(double)elapsed);cJSON_AddNumberToObject(t,"requested_pps",(double)requested_pps);cJSON_AddNumberToObject(t,"tx_pps",elapsed?g_metrics.totals.tx_submitted*1e6/elapsed:0);cJSON_AddNumberToObject(t,"rx_pps",elapsed?g_metrics.totals.rx_packets*1e6/elapsed:0);cJSON_AddNumberToObject(t,"tx_application_bps",elapsed?g_metrics.totals.tx_bytes*8e6/elapsed:0);cJSON_AddNumberToObject(t,"rx_application_bps",elapsed?g_metrics.totals.rx_bytes*8e6/elapsed:0);cJSON_AddNumberToObject(t,"goodput_bps",elapsed?g_metrics.totals.rx_bytes*8e6/elapsed:0);
-cJSON*rs=cJSON_AddObjectToObject(r,"rssi");cJSON_AddNumberToObject(rs,"min",g_metrics.rssi_count?g_metrics.rssi_min:0);cJSON_AddNumberToObject(rs,"max",g_metrics.rssi_count?g_metrics.rssi_max:0);cJSON_AddNumberToObject(rs,"mean",g_metrics.rssi_count?(double)g_metrics.rssi_sum/g_metrics.rssi_count:0);cJSON*rh=cJSON_AddArrayToObject(rs,"histogram_minus_127_to_0");for(int i=0;i<128;i++)cJSON_AddItemToArray(rh,cJSON_CreateNumber(g_metrics.rssi_hist[i]));
-cJSON*rt=cJSON_AddObjectToObject(r,"rtt");double mean=g_metrics.rtt_seen?(double)g_metrics.rtt_sum/g_metrics.rtt_seen:0;double variance=g_metrics.rtt_seen?(double)(g_metrics.rtt_sum_sq/g_metrics.rtt_seen)-mean*mean:0;cJSON_AddNumberToObject(rt,"sample_count",(double)g_metrics.rtt_seen);cJSON_AddNumberToObject(rt,"reservoir_count",g_metrics.rtt_count);cJSON_AddNumberToObject(rt,"min_us",g_metrics.rtt_seen?g_metrics.rtt_min:0);cJSON_AddNumberToObject(rt,"mean_us",mean);cJSON_AddNumberToObject(rt,"p50_us",pct(.5));cJSON_AddNumberToObject(rt,"p90_us",pct(.9));cJSON_AddNumberToObject(rt,"p95_us",pct(.95));cJSON_AddNumberToObject(rt,"p99_us",pct(.99));cJSON_AddNumberToObject(rt,"p999_us",pct(.999));cJSON_AddNumberToObject(rt,"max_us",g_metrics.rtt_max);cJSON_AddNumberToObject(rt,"stddev_us",sqrt(variance>0?variance:0));
-cJSON_AddNumberToObject(rt,"jitter_mean_abs_delta_us",g_metrics.jitter_count?(double)g_metrics.jitter_sum/g_metrics.jitter_count:0);cJSON_AddNumberToObject(rt,"jitter_max_abs_delta_us",g_metrics.jitter_max);
-cJSON*ss=cJSON_AddArrayToObject(r,"streams");for(int i=0;i<HARNESS_MAX_STREAMS;i++){stream_metric_t*m=&g_metrics.streams[i];if(!m->tx&&!m->rx)continue;cJSON*o=cJSON_CreateObject();cJSON_AddNumberToObject(o,"stream_id",i);u64(o,"tx_packets",m->tx);u64(o,"rx_packets",m->rx);u64(o,"missing",m->gaps);u64(o,"duplicate",m->duplicate);u64(o,"out_of_order",m->out_of_order);cJSON_AddItemToArray(ss,o);}return r;}
+
+static void distribution_reset(sample_distribution_t *distribution)
+{
+    memset(distribution, 0, sizeof(*distribution));
+    distribution->min = UINT32_MAX;
+}
+
+static uint64_t sample_hash(uint64_t value)
+{
+    value ^= value >> 30;
+    value *= UINT64_C(0xbf58476d1ce4e5b9);
+    value ^= value >> 27;
+    value *= UINT64_C(0x94d049bb133111eb);
+    return value ^ (value >> 31);
+}
+
+static void distribution_add(sample_distribution_t *distribution, uint64_t value)
+{
+    uint32_t bounded = value > UINT32_MAX ? UINT32_MAX : (uint32_t)value;
+    distribution->sample_count++;
+    distribution->sum += bounded;
+    distribution->sum_sq += (long double)bounded * bounded;
+    if (bounded < distribution->min) distribution->min = bounded;
+    if (bounded > distribution->max) distribution->max = bounded;
+    if (distribution->reservoir_count < METRIC_SAMPLE_CAPACITY) {
+        distribution->samples[distribution->reservoir_count++] = bounded;
+        return;
+    }
+    uint64_t slot = sample_hash(distribution->sample_count) % distribution->sample_count;
+    if (slot < METRIC_SAMPLE_CAPACITY) distribution->samples[slot] = bounded;
+}
+
+void metrics_reset(void)
+{
+    memset(&g_metrics, 0, sizeof(g_metrics));
+    g_metrics.rssi_min = 127;
+    g_metrics.rssi_max = -127;
+    distribution_reset(&g_metrics.rtt);
+    distribution_reset(&g_metrics.dispatch_lateness);
+}
+
+void metrics_tx_requested(uint16_t stream)
+{
+    __atomic_fetch_add(&g_metrics.totals.tx_requested, 1, __ATOMIC_RELAXED);
+    if (stream < HARNESS_MAX_STREAMS) {
+        __atomic_fetch_add(&g_metrics.streams[stream].tx, 1, __ATOMIC_RELAXED);
+    }
+}
+
+void metrics_tx_submitted(uint16_t stream, uint16_t length, uint64_t dispatch_us)
+{
+    (void)stream;
+    __atomic_fetch_add(&g_metrics.totals.tx_submitted, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_metrics.totals.tx_bytes, length, __ATOMIC_RELAXED);
+    if (g_metrics.first_tx_us == 0) g_metrics.first_tx_us = dispatch_us;
+    g_metrics.last_tx_us = dispatch_us;
+}
+
+void metrics_tx_api_failure(void)
+{
+    __atomic_fetch_add(&g_metrics.totals.send_api_failure, 1, __ATOMIC_RELAXED);
+}
+
+void metrics_tx_complete(bool success)
+{
+    if (success) g_metrics.totals.send_cb_success++;
+    else g_metrics.totals.send_cb_failure++;
+}
+
+void metrics_dispatch_lateness(uint64_t actual_dispatch_us, uint64_t scheduled_deadline_us)
+{
+    uint64_t lateness = actual_dispatch_us > scheduled_deadline_us ?
+                        actual_dispatch_us - scheduled_deadline_us : 0;
+    distribution_add(&g_metrics.dispatch_lateness, lateness);
+}
+
+static void sequence_observe(stream_metric_t *metric, uint32_t sequence)
+{
+    metric->rx++;
+    if (!metric->init) {
+        metric->init = true;
+        metric->highest = sequence;
+        metric->bitmap = 1;
+        metric->gaps = sequence;
+        return;
+    }
+    if (sequence > metric->highest) {
+        uint32_t distance = sequence - metric->highest;
+        if (distance > 1) metric->gaps += (uint64_t)distance - 1;
+        metric->bitmap = distance >= 64 ? 1 : (metric->bitmap << distance) | 1;
+        metric->highest = sequence;
+        return;
+    }
+    uint32_t distance = metric->highest - sequence;
+    if (distance >= 64) {
+        metric->out_of_order++;
+        return;
+    }
+    uint64_t bit = UINT64_C(1) << distance;
+    if (metric->bitmap & bit) {
+        metric->duplicate++;
+        return;
+    }
+    metric->bitmap |= bit;
+    metric->out_of_order++;
+    if (metric->gaps) metric->gaps--;
+}
+
+void metrics_rx(const bench_header_t *header, int8_t rssi, uint64_t now_us)
+{
+    if (g_metrics.totals.rx_packets == 0) g_metrics.first_rx_us = now_us;
+    g_metrics.last_rx_us = now_us;
+    g_metrics.totals.rx_packets++;
+    g_metrics.totals.rx_bytes += header->packet_len;
+    stream_metric_t *stream = &g_metrics.streams[header->stream_id];
+    uint64_t old_out_of_order = stream->out_of_order;
+    uint64_t old_duplicate = stream->duplicate;
+    sequence_observe(stream, header->seq);
+    g_metrics.totals.out_of_order += stream->out_of_order - old_out_of_order;
+    g_metrics.totals.duplicate += stream->duplicate - old_duplicate;
+
+    g_metrics.rssi_count++;
+    g_metrics.rssi_sum += rssi;
+    if (rssi < g_metrics.rssi_min) g_metrics.rssi_min = rssi;
+    if (rssi > g_metrics.rssi_max) g_metrics.rssi_max = rssi;
+    int index = rssi + 127;
+    if (index < 0) index = 0;
+    if (index > 127) index = 127;
+    g_metrics.rssi_hist[index]++;
+
+    if (header->type == PACKET_ECHO && now_us >= header->timestamp_us) {
+        uint64_t rtt = now_us - header->timestamp_us;
+        uint32_t bounded_rtt = rtt > UINT32_MAX ? UINT32_MAX : (uint32_t)rtt;
+        if (g_metrics.rtt.sample_count) {
+            uint32_t jitter = bounded_rtt > g_metrics.last_rtt ?
+                              bounded_rtt - g_metrics.last_rtt : g_metrics.last_rtt - bounded_rtt;
+            g_metrics.jitter_sum += jitter;
+            g_metrics.jitter_count++;
+            if (jitter > g_metrics.jitter_max) g_metrics.jitter_max = jitter;
+        }
+        g_metrics.last_rtt = bounded_rtt;
+        distribution_add(&g_metrics.rtt, bounded_rtt);
+    }
+}
+
+void metrics_drop(bool stale, bool invalid)
+{
+    if (stale) g_metrics.totals.stale++;
+    if (invalid) g_metrics.totals.invalid++;
+}
+
+static int compare_u32(const void *left, const void *right)
+{
+    uint32_t a = *(const uint32_t *)left;
+    uint32_t b = *(const uint32_t *)right;
+    return (a > b) - (a < b);
+}
+
+static uint32_t nearest_rank(const sample_distribution_t *distribution, double quantile)
+{
+    if (distribution->reservoir_count == 0) return 0;
+    size_t rank = (size_t)ceil(quantile * distribution->reservoir_count);
+    if (rank < 1) rank = 1;
+    if (rank > distribution->reservoir_count) rank = distribution->reservoir_count;
+    return distribution->samples[rank - 1];
+}
+
+static void add_u64(cJSON *object, const char *name, uint64_t value)
+{
+    cJSON_AddNumberToObject(object, name, (double)value);
+}
+
+static cJSON *distribution_json(sample_distribution_t *distribution)
+{
+    qsort(distribution->samples, distribution->reservoir_count, sizeof(uint32_t), compare_u32);
+    double mean = distribution->sample_count ? (double)distribution->sum / distribution->sample_count : 0;
+    double variance = distribution->sample_count ?
+                      (double)(distribution->sum_sq / distribution->sample_count) - mean * mean : 0;
+    cJSON *object = cJSON_CreateObject();
+    add_u64(object, "sample_count", distribution->sample_count);
+    cJSON_AddNumberToObject(object, "reservoir_count", distribution->reservoir_count);
+    cJSON_AddNumberToObject(object, "min_us", distribution->sample_count ? distribution->min : 0);
+    cJSON_AddNumberToObject(object, "mean_us", mean);
+    cJSON_AddNumberToObject(object, "p50_us", nearest_rank(distribution, 0.50));
+    cJSON_AddNumberToObject(object, "p90_us", nearest_rank(distribution, 0.90));
+    cJSON_AddNumberToObject(object, "p95_us", nearest_rank(distribution, 0.95));
+    cJSON_AddNumberToObject(object, "p99_us", nearest_rank(distribution, 0.99));
+    cJSON_AddNumberToObject(object, "p999_us", nearest_rank(distribution, 0.999));
+    cJSON_AddNumberToObject(object, "max_us", distribution->max);
+    cJSON_AddNumberToObject(object, "stddev_us", sqrt(variance > 0 ? variance : 0));
+    return object;
+}
+
+cJSON *metrics_json(void)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON *totals = cJSON_AddObjectToObject(root, "totals");
+    uint64_t gaps = 0;
+    for (size_t i = 0; i < HARNESS_MAX_STREAMS; ++i) gaps += g_metrics.streams[i].gaps;
+    g_metrics.totals.estimated_loss = gaps;
+#define ADD_TOTAL(name) add_u64(totals, #name, g_metrics.totals.name)
+    ADD_TOTAL(tx_requested); ADD_TOTAL(tx_submitted); ADD_TOTAL(tx_bytes);
+    ADD_TOTAL(send_cb_success); ADD_TOTAL(send_cb_failure); ADD_TOTAL(send_api_failure);
+    ADD_TOTAL(rx_packets); ADD_TOTAL(rx_bytes); ADD_TOTAL(duplicate); ADD_TOTAL(out_of_order);
+    ADD_TOTAL(estimated_loss); ADD_TOTAL(stale); ADD_TOTAL(invalid); ADD_TOTAL(queue_drops);
+#undef ADD_TOTAL
+    uint64_t elapsed = g_metrics.end_us > g_metrics.start_us ? g_metrics.end_us - g_metrics.start_us : 0;
+    uint64_t tx_window = g_metrics.last_tx_us > g_metrics.first_tx_us ? g_metrics.last_tx_us - g_metrics.first_tx_us : 0;
+    uint64_t rx_window = g_metrics.last_rx_us > g_metrics.first_rx_us ? g_metrics.last_rx_us - g_metrics.first_rx_us : 0;
+    uint64_t requested_pps = g_config.mode == MODE_SATURATION ? 0 :
+        (g_config.mode == MODE_LATENCY_LOAD ? (uint64_t)g_config.background_rate + g_config.probe_rate :
+         (uint64_t)g_config.rate_per_stream * g_config.streams);
+    add_u64(totals, "elapsed_us", elapsed);
+    add_u64(totals, "first_tx_us", g_metrics.first_tx_us);
+    add_u64(totals, "last_tx_us", g_metrics.last_tx_us);
+    add_u64(totals, "tx_window_us", tx_window);
+    add_u64(totals, "first_rx_us", g_metrics.first_rx_us);
+    add_u64(totals, "last_rx_us", g_metrics.last_rx_us);
+    add_u64(totals, "rx_window_us", rx_window);
+    add_u64(totals, "requested_pps", requested_pps);
+    cJSON_AddNumberToObject(totals, "tx_pps", elapsed ? g_metrics.totals.tx_submitted * 1e6 / elapsed : 0);
+    cJSON_AddNumberToObject(totals, "tx_pps_active", tx_window ? g_metrics.totals.tx_submitted * 1e6 / tx_window : 0);
+    cJSON_AddNumberToObject(totals, "rx_pps", elapsed ? g_metrics.totals.rx_packets * 1e6 / elapsed : 0);
+    cJSON_AddNumberToObject(totals, "rx_pps_active", rx_window ? g_metrics.totals.rx_packets * 1e6 / rx_window : 0);
+    cJSON_AddNumberToObject(totals, "tx_application_bps", elapsed ? g_metrics.totals.tx_bytes * 8e6 / elapsed : 0);
+    cJSON_AddNumberToObject(totals, "tx_application_bps_active", tx_window ? g_metrics.totals.tx_bytes * 8e6 / tx_window : 0);
+    cJSON_AddNumberToObject(totals, "rx_application_bps", elapsed ? g_metrics.totals.rx_bytes * 8e6 / elapsed : 0);
+    cJSON_AddNumberToObject(totals, "goodput_bps", elapsed ? g_metrics.totals.rx_bytes * 8e6 / elapsed : 0);
+    cJSON_AddNumberToObject(totals, "goodput_bps_active", rx_window ? g_metrics.totals.rx_bytes * 8e6 / rx_window : 0);
+
+    cJSON *rssi = cJSON_AddObjectToObject(root, "rssi");
+    cJSON_AddNumberToObject(rssi, "min", g_metrics.rssi_count ? g_metrics.rssi_min : 0);
+    cJSON_AddNumberToObject(rssi, "max", g_metrics.rssi_count ? g_metrics.rssi_max : 0);
+    cJSON_AddNumberToObject(rssi, "mean", g_metrics.rssi_count ? (double)g_metrics.rssi_sum / g_metrics.rssi_count : 0);
+    cJSON *histogram = cJSON_AddArrayToObject(rssi, "histogram_minus_127_to_0");
+    for (size_t i = 0; i < 128; ++i) cJSON_AddItemToArray(histogram, cJSON_CreateNumber(g_metrics.rssi_hist[i]));
+
+    cJSON *rtt = distribution_json(&g_metrics.rtt);
+    cJSON_AddNumberToObject(rtt, "jitter_mean_abs_delta_us",
+                            g_metrics.jitter_count ? (double)g_metrics.jitter_sum / g_metrics.jitter_count : 0);
+    cJSON_AddNumberToObject(rtt, "jitter_max_abs_delta_us", g_metrics.jitter_max);
+    cJSON_AddItemToObject(root, "rtt", rtt);
+    cJSON_AddItemToObject(root, "dispatch_lateness", distribution_json(&g_metrics.dispatch_lateness));
+
+    cJSON *streams = cJSON_AddArrayToObject(root, "streams");
+    for (size_t i = 0; i < HARNESS_MAX_STREAMS; ++i) {
+        stream_metric_t *metric = &g_metrics.streams[i];
+        if (!metric->tx && !metric->rx) continue;
+        cJSON *item = cJSON_CreateObject();
+        cJSON_AddNumberToObject(item, "stream_id", i);
+        add_u64(item, "tx_packets", metric->tx);
+        add_u64(item, "rx_packets", metric->rx);
+        add_u64(item, "missing", metric->gaps);
+        add_u64(item, "duplicate", metric->duplicate);
+        add_u64(item, "out_of_order", metric->out_of_order);
+        cJSON_AddItemToArray(streams, item);
+    }
+    return root;
+}

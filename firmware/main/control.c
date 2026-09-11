@@ -4,6 +4,7 @@
 #include "metrics.h"
 #include "protocol.h"
 #include "radio.h"
+#include "receiver.h"
 #include "cJSON.h"
 #include "esp_err.h"
 #include "esp_idf_version.h"
@@ -226,12 +227,14 @@ static bool parse_config(cJSON *root, char *why, size_t why_capacity)
 
     double packet_size = number_item(traffic, "packet_size", -1);
     double streams = number_item(traffic, "streams", 1);
+    double tx_window = number_item(traffic, "tx_window", 1);
     double rate = number_item(traffic, "packet_rate_per_stream", 0);
     double probe_rate = number_item(traffic, "probe_rate", 0);
     double background_size = number_item(traffic, "background_packet_size", 0);
     double background_rate = number_item(traffic, "background_rate", 0);
     if (!integer_in_range(packet_size, BENCH_HEADER_SIZE, HARNESS_MAX_PACKET_SIZE) ||
         !integer_in_range(streams, 1, HARNESS_MAX_STREAMS) || !integer_in_range(rate, 0, UINT32_MAX) ||
+        !integer_in_range(tx_window, 1, HARNESS_MAX_TX_WINDOW) ||
         !integer_in_range(probe_rate, 0, UINT32_MAX) ||
         !integer_in_range(background_size, 0, HARNESS_MAX_PACKET_SIZE) ||
         !integer_in_range(background_rate, 0, UINT32_MAX)) {
@@ -240,6 +243,7 @@ static bool parse_config(cJSON *root, char *why, size_t why_capacity)
     }
     cfg.packet_size = (uint16_t)packet_size;
     cfg.streams = (uint16_t)streams;
+    cfg.tx_window = (uint16_t)tx_window;
     cfg.rate_per_stream = (uint32_t)rate;
     cfg.probe_rate = (uint32_t)probe_rate;
     cfg.background_packet_size = (uint16_t)background_size;
@@ -282,6 +286,7 @@ static void send_info(double id)
     cJSON *cap = cJSON_AddObjectToObject(info, "capabilities");
     cJSON_AddNumberToObject(cap, "max_packet_size", HARNESS_MAX_PACKET_SIZE);
     cJSON_AddNumberToObject(cap, "max_streams", HARNESS_MAX_STREAMS);
+    cJSON_AddNumberToObject(cap, "max_tx_window", HARNESS_MAX_TX_WINDOW);
     cJSON *bands = cJSON_AddArrayToObject(cap, "bands");
     cJSON_AddItemToArray(bands, cJSON_CreateString("2.4ghz"));
     cJSON_AddItemToArray(bands, cJSON_CreateString("5ghz"));
@@ -299,6 +304,14 @@ static void send_state(double id)
     cJSON *root = response(id, true);
     cJSON_AddStringToObject(root, "state", harness_state_name(g_state));
     send_json(root);
+}
+
+static bool drain_measurement_events(void)
+{
+    /* RX processing can submit an echo, so fence both sides twice. */
+    return receiver_flush(2000) && radio_wait_idle(2000) == ESP_OK &&
+           receiver_flush(2000) && radio_wait_idle(2000) == ESP_OK &&
+           receiver_flush(2000);
 }
 
 static void dispatch(cJSON *root)
@@ -380,12 +393,20 @@ static void dispatch(cJSON *root)
             g_state = STATE_FINISHED;
             g_metrics.end_us = (uint64_t)esp_timer_get_time();
         }
+        if (!generator_wait_stopped(2000) || !drain_measurement_events()) {
+            send_error(id, "drain_timeout", "timed out draining measurement events");
+            return;
+        }
         send_state(id);
         return;
     }
     if (strcmp(command, "result") == 0) {
         if (g_state != STATE_FINISHED) {
             send_error(id, "invalid_state", "result requires FINISHED");
+            return;
+        }
+        if (!generator_wait_stopped(2000) || !drain_measurement_events()) {
+            send_error(id, "drain_timeout", "timed out draining measurement events");
             return;
         }
         cJSON *reply = response(id, true);

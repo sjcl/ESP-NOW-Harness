@@ -59,6 +59,8 @@ pub struct Traffic {
     pub mode: Mode,
     #[serde(default = "one")]
     pub streams: u16,
+    #[serde(default = "one")]
+    pub tx_window: u16,
     pub packet_size: u16,
     #[serde(default)]
     pub packet_rate_per_stream: u32,
@@ -103,6 +105,9 @@ impl Scenario {
         }
         if !(1..=16).contains(&self.traffic.streams) {
             bail!("streams must be 1..16");
+        }
+        if !(1..=32).contains(&self.traffic.tx_window) {
+            bail!("tx_window must be 1..32");
         }
         let channel_ok = match self.radio.band {
             Band::Ghz2 => (1..=14).contains(&self.radio.channel),
@@ -181,6 +186,7 @@ mod tests {
             traffic: Traffic {
                 mode: Mode::Stream,
                 streams: 1,
+                tx_window: 1,
                 packet_size: 64,
                 packet_rate_per_stream: 100,
                 probe_rate: 0,
@@ -204,6 +210,20 @@ mod tests {
         let mut s = valid();
         s.radio.band = Band::Ghz5;
         assert!(s.validate().is_err());
+    }
+    #[test]
+    fn rejects_invalid_tx_window() {
+        let mut s = valid();
+        s.traffic.tx_window = 0;
+        assert!(s.validate().is_err());
+        s.traffic.tx_window = 33;
+        assert!(s.validate().is_err());
+    }
+    #[test]
+    fn tx_window_defaults_to_one() {
+        let t = "name='x'\nduration='1s'\n[radio]\nband='2.4ghz'\nchannel=6\n[traffic]\nmode='stream'\npacket_size=64\npacket_rate_per_stream=1";
+        let scenario: Scenario = toml::from_str(t).unwrap();
+        assert_eq!(scenario.traffic.tx_window, 1);
     }
     #[test]
     fn rejects_unknown_field() {
