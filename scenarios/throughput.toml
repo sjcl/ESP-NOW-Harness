@@ -1,0 +1,17 @@
+name = "throughput-saturation"
+duration = "20s"
+settle_ms = 250
+
+[radio]
+band = "5ghz"
+country = "JP"
+channel = 36
+phy_rate = "mcs7"
+tx_power_dbm = 20.0
+power_save = false
+encryption = false
+
+[traffic]
+mode = "saturation"
+streams = 1
+packet_size = 250

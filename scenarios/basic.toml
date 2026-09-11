@@ -1,0 +1,18 @@
+name = "basic"
+duration = "10s"
+settle_ms = 250
+
+[radio]
+band = "2.4ghz"
+country = "JP"
+channel = 6
+phy_rate = "mcs0"
+tx_power_dbm = 20.0
+power_save = false
+encryption = false
+
+[traffic]
+mode = "stream"
+streams = 1
+packet_size = 64
+packet_rate_per_stream = 100

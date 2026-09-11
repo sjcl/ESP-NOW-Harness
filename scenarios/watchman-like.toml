@@ -1,0 +1,19 @@
+# Placeholder until USBPcap-derived timing is available.
+name = "watchman-like"
+duration = "30s"
+settle_ms = 250
+
+[radio]
+band = "5ghz"
+country = "JP"
+channel = 36
+phy_rate = "mcs0"
+tx_power_dbm = 20.0
+power_save = false
+encryption = false
+
+[traffic]
+mode = "multi-stream"
+streams = 12
+packet_size = 64
+packet_rate_per_stream = 300

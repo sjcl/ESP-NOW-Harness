@@ -1,0 +1,21 @@
+name = "latency-under-load"
+duration = "30s"
+settle_ms = 250
+
+[radio]
+band = "5ghz"
+country = "JP"
+channel = 36
+phy_rate = "mcs7"
+tx_power_dbm = 20.0
+power_save = false
+encryption = false
+
+[traffic]
+mode = "latency-under-load"
+streams = 1
+packet_size = 64
+probe_rate = 100
+background_packet_size = 250
+# Complete ESP-NOW application frames: 1000 * 250 * 8 = 2 Mbit/s requested.
+background_rate = 1000

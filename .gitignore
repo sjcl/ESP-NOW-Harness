@@ -1,0 +1,6 @@
+/target/
+/firmware/build/
+/firmware/test/build/
+/results/
+/sdkconfig
+*.log
