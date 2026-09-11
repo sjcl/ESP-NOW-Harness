@@ -1,6 +1,6 @@
 # ESP-NOW Harness
 
-ESP32-C5 を同一 firmware の汎用 node として使い、Windows host から role と scenario を割り当てる ESP-NOW benchmark harness です。small-packet PPS、RTT/tail latency、jitter、loss、duplicate、out-of-order、application goodput、RSSI、および latency-under-load を測定します。Watchman 固有処理は含みません。
+ESP32-C5 を同一 firmware の汎用 node として使い、Windows host から role と scenario を割り当てる ESP-NOW benchmark harness です。small-packet PPS、RTT/tail latency、jitter、loss、duplicate、out-of-order、application goodput、RSSI、および latency-under-load を測定します。
 
 ```text
                             Windows PC
@@ -111,10 +111,10 @@ ctest --test-dir firmware/test/build --output-on-failure
    target\release\espnow-harness.exe run scenarios\latency.toml --node-a COM5 --node-b COM6
    ```
 
-4. Run multi-stream and load-latency tests:
+4. Run saturation throughput and load-latency tests:
 
    ```powershell
-   target\release\espnow-harness.exe run scenarios\watchman-like.toml --node-a COM5 --node-b COM6
+   target\release\espnow-harness.exe run scenarios\throughput.toml --node-a COM5 --node-b COM6
    target\release\espnow-harness.exe run scenarios\latency-under-load.toml --node-a COM5 --node-b COM6
    ```
 
@@ -166,6 +166,6 @@ Metadata includes host/firmware/IDF versions, optional Git commit, node MAC/capa
 
 Implemented: identical configurable firmware; 16 logical streams; ping, constant-rate stream, interleaved multi-stream, completion-limited saturation, latency-under-load; radio band/channel/rate/power/power-save/encryption configuration; bounded metrics; discovery/orchestration; JSON/CSV/human results; protocol/scenario/sequence/percentile/serialization tests.
 
-Not implemented in v1: USBPcap parsing, Watchman protocol handling, trace replay, synchronized one-way latency, GPIO sync, 3+ node orchestration, automatic sweeps, GUI/graphs. A future trace-driven generator should emit the same `{deadline, packet_size, stream_id, type}` scheduling items as the constant-rate generator; no wire-format change is required. A future protocol version can add clock-domain and sync metadata without reinterpreting the v1 timestamp.
+Not implemented in v1: trace replay, synchronized one-way latency, GPIO sync, 3+ node orchestration, automatic sweeps, GUI/graphs. A future trace-driven generator should emit the same `{deadline, packet_size, stream_id, type}` scheduling items as the constant-rate generator; no wire-format change is required. A future protocol version can add clock-domain and sync metadata without reinterpreting the v1 timestamp.
 
 Before trusting numbers, verify the actual evaluation board has a suitable dual-band RF path, use identical power supplies/cables, fix node placement/orientation, record interference/channel/regulatory settings, perform a warm-up run, and repeat each scenario several times.
