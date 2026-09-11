@@ -4,4 +4,3 @@ idf_component_register(
     PRIV_REQUIRES esp_wifi esp_event esp_netif nvs_flash esp_timer json
 )
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)
-
