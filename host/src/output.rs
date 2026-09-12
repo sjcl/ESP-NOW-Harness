@@ -1,5 +1,5 @@
 use crate::{
-    protocol::Info,
+    protocol::{CONTROL_VERSION, Info},
     scenario::{Mode, Scenario},
 };
 use anyhow::Result;
@@ -69,6 +69,24 @@ pub struct Metadata<'a> {
     pub requested_duration_ms: u128,
     pub scenario: &'a Scenario,
     pub nodes: [&'a Info; 2],
+}
+
+fn stream_tx_counters(result: &serde_json::Value, stream_id: u64) -> (u64, u64) {
+    let stream = result
+        .pointer("/streams")
+        .and_then(|v| v.as_array())
+        .and_then(|streams| {
+            streams
+                .iter()
+                .find(|s| s.get("stream_id").and_then(|v| v.as_u64()) == Some(stream_id))
+        });
+    let counter = |name| {
+        stream
+            .and_then(|s| s.get(name))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+    };
+    (counter("tx_requested"), counter("tx_submitted"))
 }
 
 pub fn save(
@@ -148,18 +166,9 @@ pub fn save(
     } else {
         0
     };
-    let probe_tx = a_result
-        .pointer("/streams")
-        .and_then(|v| v.as_array())
-        .and_then(|a| {
-            a.iter()
-                .find(|s| s.get("stream_id").and_then(|v| v.as_u64()) == Some(probe_stream))
-        })
-        .and_then(|s| s.get("tx_packets"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let aggregate = serde_json::json!({"tx_packets":tx,"unique_rx_packets":unique_rx,"forward_packet_loss":loss,"forward_packet_loss_percent":if tx>0{loss as f64*100.0/tx as f64}else{0.0},"rx_goodput_bps_tx_window":rx_goodput_bps_tx_window,"tx_window_us":tx_window_us,"rtt_probes_sent":probe_tx,"completed_rtt_probes":rtt,"rtt_probe_loss":probe_tx.saturating_sub(rtt)});
-    let combined = serde_json::json!({"protocol_version":1,"aggregate":aggregate,"node_a":a_result,"node_b":b_result});
+    let (probe_requested, probe_submitted) = stream_tx_counters(a_result, probe_stream);
+    let aggregate = serde_json::json!({"tx_packets":tx,"unique_rx_packets":unique_rx,"forward_packet_loss":loss,"forward_packet_loss_percent":if tx>0{loss as f64*100.0/tx as f64}else{0.0},"rx_goodput_bps_tx_window":rx_goodput_bps_tx_window,"tx_window_us":tx_window_us,"rtt_probes_requested":probe_requested,"rtt_probes_submitted":probe_submitted,"completed_rtt_probes":rtt,"local_probe_drop":probe_requested.saturating_sub(probe_submitted),"network_or_echo_probe_loss":probe_submitted.saturating_sub(rtt)});
+    let combined = serde_json::json!({"protocol_version":CONTROL_VERSION,"aggregate":aggregate,"node_a":a_result,"node_b":b_result});
     fs::write(
         dir.join("result.json"),
         serde_json::to_vec_pretty(&combined)?,
@@ -183,6 +192,16 @@ pub fn save(
         },
         rx_goodput_bps_tx_window
     );
+    if matches!(scenario.traffic.mode, Mode::Ping | Mode::LatencyUnderLoad) {
+        println!(
+            "RTT probes: requested={} submitted={} completed={} local_drop={} network_or_echo_loss={}",
+            probe_requested,
+            probe_submitted,
+            rtt,
+            probe_requested.saturating_sub(probe_submitted),
+            probe_submitted.saturating_sub(rtt)
+        );
+    }
     print_summary("A", a_result);
     print_summary("B", b_result);
     Ok(dir)
@@ -216,11 +235,12 @@ fn flatten_csv(
 fn print_summary(node: &str, v: &serde_json::Value) {
     let g = |k| v.pointer(k).cloned().unwrap_or(serde_json::Value::Null);
     println!(
-        "node {node}: tx={} rx={} loss={} send_fail={} rssi_mean={} dBm rtt_p99={} us dispatch_lateness_p99={} us active_rx_goodput={} bps",
+        "node {node}: tx={} rx={} loss={} send_fail={} slot_timeout={} rssi_mean={} dBm rtt_p99={} us dispatch_lateness_p99={} us active_rx_goodput={} bps",
         g("/totals/tx_submitted"),
         g("/totals/rx_packets"),
         g("/totals/estimated_loss"),
         g("/totals/send_cb_failure"),
+        g("/totals/tx_slot_timeout"),
         g("/rssi/mean"),
         g("/rtt/p99_us"),
         g("/dispatch_lateness/p99_us"),
@@ -251,5 +271,14 @@ mod tests {
                 .unwrap()
                 .contains("p99_us")
         );
+    }
+    #[test]
+    fn extracts_requested_and_submitted_per_stream() {
+        let result = serde_json::json!({"streams":[
+            {"stream_id":0,"tx_requested":100,"tx_submitted":97},
+            {"stream_id":15,"tx_requested":20,"tx_submitted":18}
+        ]});
+        assert_eq!(stream_tx_counters(&result, 15), (20, 18));
+        assert_eq!(stream_tx_counters(&result, 7), (0, 0));
     }
 }

@@ -2,8 +2,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define HARNESS_CONTROL_VERSION 1
-#define HARNESS_FW_VERSION "0.2.0"
+#define HARNESS_CONTROL_VERSION 2
+#define HARNESS_FW_VERSION "0.2.1"
 #define HARNESS_MAX_STREAMS 16
 #define HARNESS_MAX_PACKET_SIZE 250
 #define HARNESS_KEY_SIZE 16

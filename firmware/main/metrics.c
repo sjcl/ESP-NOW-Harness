@@ -49,15 +49,17 @@ void metrics_tx_requested(uint16_t stream)
 {
     __atomic_fetch_add(&g_metrics.totals.tx_requested, 1, __ATOMIC_RELAXED);
     if (stream < HARNESS_MAX_STREAMS) {
-        __atomic_fetch_add(&g_metrics.streams[stream].tx, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_metrics.streams[stream].tx_requested, 1, __ATOMIC_RELAXED);
     }
 }
 
 void metrics_tx_submitted(uint16_t stream, uint16_t length, uint64_t dispatch_us)
 {
-    (void)stream;
     __atomic_fetch_add(&g_metrics.totals.tx_submitted, 1, __ATOMIC_RELAXED);
     __atomic_fetch_add(&g_metrics.totals.tx_bytes, length, __ATOMIC_RELAXED);
+    if (stream < HARNESS_MAX_STREAMS) {
+        __atomic_fetch_add(&g_metrics.streams[stream].tx_submitted, 1, __ATOMIC_RELAXED);
+    }
     if (g_metrics.first_tx_us == 0) g_metrics.first_tx_us = dispatch_us;
     g_metrics.last_tx_us = dispatch_us;
 }
@@ -65,6 +67,11 @@ void metrics_tx_submitted(uint16_t stream, uint16_t length, uint64_t dispatch_us
 void metrics_tx_api_failure(void)
 {
     __atomic_fetch_add(&g_metrics.totals.send_api_failure, 1, __ATOMIC_RELAXED);
+}
+
+void metrics_tx_slot_timeout(void)
+{
+    __atomic_fetch_add(&g_metrics.totals.tx_slot_timeout, 1, __ATOMIC_RELAXED);
 }
 
 void metrics_tx_complete(bool success)
@@ -207,6 +214,7 @@ cJSON *metrics_json(void)
 #define ADD_TOTAL(name) add_u64(totals, #name, g_metrics.totals.name)
     ADD_TOTAL(tx_requested); ADD_TOTAL(tx_submitted); ADD_TOTAL(tx_bytes);
     ADD_TOTAL(send_cb_success); ADD_TOTAL(send_cb_failure); ADD_TOTAL(send_api_failure);
+    ADD_TOTAL(tx_slot_timeout);
     ADD_TOTAL(rx_packets); ADD_TOTAL(rx_bytes); ADD_TOTAL(duplicate); ADD_TOTAL(out_of_order);
     ADD_TOTAL(estimated_loss); ADD_TOTAL(stale); ADD_TOTAL(invalid); ADD_TOTAL(queue_drops);
 #undef ADD_TOTAL
@@ -251,10 +259,11 @@ cJSON *metrics_json(void)
     cJSON *streams = cJSON_AddArrayToObject(root, "streams");
     for (size_t i = 0; i < HARNESS_MAX_STREAMS; ++i) {
         stream_metric_t *metric = &g_metrics.streams[i];
-        if (!metric->tx && !metric->rx) continue;
+        if (!metric->tx_requested && !metric->rx) continue;
         cJSON *item = cJSON_CreateObject();
         cJSON_AddNumberToObject(item, "stream_id", i);
-        add_u64(item, "tx_packets", metric->tx);
+        add_u64(item, "tx_requested", metric->tx_requested);
+        add_u64(item, "tx_submitted", metric->tx_submitted);
         add_u64(item, "rx_packets", metric->rx);
         add_u64(item, "missing", metric->gaps);
         add_u64(item, "duplicate", metric->duplicate);

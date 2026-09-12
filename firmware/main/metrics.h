@@ -14,6 +14,7 @@ typedef struct {
     uint64_t send_cb_success;
     uint64_t send_cb_failure;
     uint64_t send_api_failure;
+    uint64_t tx_slot_timeout;
     uint64_t rx_packets;
     uint64_t rx_bytes;
     uint64_t duplicate;
@@ -32,7 +33,8 @@ typedef struct {
     uint64_t duplicate;
     uint64_t out_of_order;
     uint64_t gaps;
-    uint64_t tx;
+    uint64_t tx_requested;
+    uint64_t tx_submitted;
 } stream_metric_t;
 
 typedef struct {
@@ -72,6 +74,7 @@ void metrics_reset(void);
 void metrics_tx_requested(uint16_t stream);
 void metrics_tx_submitted(uint16_t stream, uint16_t length, uint64_t dispatch_us);
 void metrics_tx_api_failure(void);
+void metrics_tx_slot_timeout(void);
 void metrics_tx_complete(bool success);
 void metrics_dispatch_lateness(uint64_t actual_dispatch_us, uint64_t scheduled_deadline_us);
 void metrics_rx(const bench_header_t *header, int8_t rssi, uint64_t now_us);

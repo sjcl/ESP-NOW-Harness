@@ -26,15 +26,18 @@ static void wait_deadline(uint64_t deadline_us)
     }
 }
 
-static void send_one(uint8_t type, uint16_t stream, uint32_t sequence, uint16_t size,
+static bool send_one(uint8_t type, uint16_t stream, uint32_t sequence, uint16_t size,
                      uint64_t scheduled_deadline_us, bool scheduled)
 {
     uint8_t packet[HARNESS_MAX_PACKET_SIZE];
     metrics_tx_requested(stream);
     esp_err_t error = radio_acquire_tx(100);
     if (error != ESP_OK) {
-        metrics_tx_api_failure();
-        return;
+        if (scheduled) {
+            metrics_dispatch_lateness((uint64_t)esp_timer_get_time(), scheduled_deadline_us);
+        }
+        metrics_tx_slot_timeout();
+        return false;
     }
 
     uint64_t dispatch_us = (uint64_t)esp_timer_get_time();
@@ -51,14 +54,16 @@ static void send_one(uint8_t type, uint16_t stream, uint32_t sequence, uint16_t 
     if (!bench_encode(packet, sizeof(packet), &header)) {
         radio_release_tx();
         metrics_tx_api_failure();
-        return;
+        return false;
     }
     error = radio_send_acquired(packet, size);
     if (error == ESP_OK) {
         metrics_tx_submitted(stream, size, dispatch_us);
+        return true;
     } else {
         metrics_tx_api_failure();
         if (!scheduled) taskYIELD();
+        return false;
     }
 }
 
@@ -82,15 +87,19 @@ static void generator_task(void *argument)
             wait_deadline(deadline_us);
             if (probe) {
                 uint16_t stream = HARNESS_MAX_STREAMS - 1;
-                send_one(PACKET_PING, stream, sequences[stream]++, g_config.packet_size,
-                         deadline_us, true);
+                if (send_one(PACKET_PING, stream, sequences[stream], g_config.packet_size,
+                             deadline_us, true)) {
+                    sequences[stream]++;
+                }
                 probe_index++;
                 next_probe_us = start_us + probe_index * 1000000ULL / g_config.probe_rate;
             } else {
                 uint16_t background_streams = g_config.streams > 15 ? 15 : g_config.streams;
                 uint16_t stream = (uint16_t)(background_index % background_streams);
-                send_one(PACKET_STREAM, stream, sequences[stream]++,
-                         g_config.background_packet_size, deadline_us, true);
+                if (send_one(PACKET_STREAM, stream, sequences[stream],
+                             g_config.background_packet_size, deadline_us, true)) {
+                    sequences[stream]++;
+                }
                 background_index++;
                 next_background_us = start_us +
                     background_index * 1000000ULL / g_config.background_rate;
@@ -104,8 +113,10 @@ static void generator_task(void *argument)
             if (rate) wait_deadline(deadline_us);
             uint16_t stream = (uint16_t)(index % g_config.streams);
             uint8_t type = g_config.mode == MODE_PING ? PACKET_PING : PACKET_STREAM;
-            send_one(type, stream, sequences[stream]++, g_config.packet_size,
-                     deadline_us, rate != 0);
+            if (send_one(type, stream, sequences[stream], g_config.packet_size,
+                         deadline_us, rate != 0)) {
+                sequences[stream]++;
+            }
             index++;
         }
     }

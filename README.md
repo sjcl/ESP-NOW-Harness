@@ -41,11 +41,11 @@ RX/TX callbacks only capture `esp_timer_get_time()`, RSSI, completion status and
 
 The generator uses absolute deadlines (`start + index * 1_000_000 / rate`) so delay does not accumulate. It sleeps for the coarse part and uses a short microsecond delay only near the deadline. Streams are round-robin interleaved. `traffic.tx_window` is a bounded count of submitted frames whose send callbacks have not yet arrived (valid range 1–32). `tx_window = 1` is the conservative completion-serialized baseline; larger windows allow saturation tests to exercise driver/radio capacity without creating an unbounded queue. The supplied throughput scenario uses 8.
 
-For deadline-driven modes, `dispatch_lateness_us = actual_dispatch - scheduled_deadline` is sampled after a TX-window slot is acquired as the packet enters the final encode/send path. It exposes scheduler or queueing delay that RTT intentionally does not include. Saturation has no requested deadline, so its lateness sample count is zero.
+For deadline-driven modes, `dispatch_lateness_us = actual_dispatch - scheduled_deadline` is sampled after a TX-window slot is acquired as the packet enters the final encode/send path. If the 100 ms slot wait times out, the timeout instant is still added to the lateness distribution and `tx_slot_timeout` is incremented, so the worst overloaded packets do not disappear from tail statistics. Saturation has no requested deadline, so its lateness sample count is zero.
 
 RTT uses only the initiator's `esp_timer` clock: its dispatch timestamp is echoed unchanged. Up to 8192 RTT and 8192 dispatch-lateness samples are retained independently. Beyond that, deterministic bounded reservoir replacement is used. Percentiles use standard nearest-rank: rank `ceil(q × N)`, followed by zero-based index `rank - 1`. Exact min/max, count, mean and standard deviation are accumulated over all samples. Jitter is reported as mean/max absolute difference between consecutive RTT samples. One-way latency is intentionally not reported.
 
-Sequence detection uses a 64-packet sliding bitmap per stream. It detects recent duplicates and reordering; packets arriving more than 63 behind the current highest sequence are conservatively classified out-of-order. Host aggregate loss uses submitted TX versus unique RX, which also captures trailing loss that receiver-side gap counting cannot infer.
+Sequence numbers advance only after `esp_now_send()` accepts a frame with `ESP_OK`. Sequence gaps and receiver `estimated_loss` therefore represent accepted frames absent at the peer, not local slot timeouts or send API rejection. Sequence detection uses a 64-packet sliding bitmap per stream. It detects recent duplicates and reordering; packets arriving more than 63 behind the current highest sequence are conservatively classified out-of-order. Each stream reports `tx_requested`, `tx_submitted`, `rx_packets`, `missing`, `duplicate`, and `out_of_order`. Host aggregate loss uses submitted TX versus unique RX, which also captures trailing loss that receiver-side gap counting cannot infer.
 
 State transitions are explicit:
 
@@ -134,14 +134,14 @@ For encryption, add `key = "00112233445566778899aabbccddeeff"`; it is used as th
 
 ## Control protocol
 
-Control is JSON Lines, version 1. Each request carries an `id`; each response echoes it and has `ok`, structured `code/message` on failure, and optional `state`, `info`, or `result`.
+Control and result JSON use protocol version 2. The ESP-NOW benchmark packet format remains version 1. Each control request carries an `id`; each response echoes it and has `ok`, structured `code/message` on failure, and optional `state`, `info`, or `result`.
 
 ```json
-{"version":1,"id":1,"cmd":"info"}
-{"version":1,"id":2,"cmd":"configure","run_id":42,"role":"generator","peer_mac":"aa:bb:cc:dd:ee:ff","radio":{},"traffic":{},"duration_us":10000000}
-{"version":1,"id":3,"cmd":"arm","run_id":42}
-{"version":1,"id":4,"cmd":"start","run_id":42}
-{"version":1,"id":5,"cmd":"result","run_id":42}
+{"version":2,"id":1,"cmd":"info"}
+{"version":2,"id":2,"cmd":"configure","run_id":42,"role":"generator","peer_mac":"aa:bb:cc:dd:ee:ff","radio":{},"traffic":{},"duration_us":10000000}
+{"version":2,"id":3,"cmd":"arm","run_id":42}
+{"version":2,"id":4,"cmd":"start","run_id":42}
+{"version":2,"id":5,"cmd":"result","run_id":42}
 ```
 
 The host performs configure A/B, arm receiver, arm generator, start receiver, start generator, stop, then result collection. Errors cover incompatible version, invalid packet size/config, invalid state, radio/channel/rate failure, run mismatch, serial timeout/disconnect, peer/send failure, queue pressure, and stale/invalid frame counters. A reboot normally appears as a command timeout or loss of configured state.
@@ -161,6 +161,7 @@ results/2026-09-12T001234Z-basic/
 Metadata includes host/firmware/IDF versions, optional Git commit, node MAC/capabilities, full radio/scenario configuration, start time and requested duration. JSON retains per-node/per-stream counters, RSSI histogram (-127 through 0 dBm), RTT and dispatch-lateness distributions, first/last TX/RX timestamps, active windows, and aggregate cross-node loss. CSV flattens scalar fields for comparison.
 
 - RTT is A→B→A application echo time, not one-way delay. p99 means 99% of retained RTT samples are at or below that value; inspect p99.9/max for tracking-relevant stalls.
+- RTT probe accounting is split into `rtt_probes_requested`, `rtt_probes_submitted`, and `completed_rtt_probes`. `local_probe_drop` is requested minus submitted; `network_or_echo_probe_loss` is submitted minus completed.
 - Dispatch lateness is time spent past the packet's absolute schedule before entering the send path, including waiting for a TX-window slot. Inspect it alongside RTT; low RTT does not imply on-time generation.
 - Packet loss is submitted frames minus unique received frames. Send callback success is MAC-layer delivery, not proof that the application processed the frame.
 - Goodput is received benchmark application bytes per second, including the 28-byte harness header but excluding ESP-NOW/Wi-Fi overhead. Per-node `goodput_bps_active` uses B's first-to-last RX window; aggregate `rx_goodput_bps_tx_window` divides B's received bytes by A's first-to-last successful dispatch window, avoiding serial start/stop skew. A single-packet run has no measurable active window and reports zero.

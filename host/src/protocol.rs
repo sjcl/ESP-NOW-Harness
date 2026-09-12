@@ -1,7 +1,8 @@
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
-pub const CONTROL_VERSION: u8 = 1;
+pub const CONTROL_VERSION: u8 = 2;
+pub const BENCH_PROTOCOL_VERSION: u8 = 1;
 #[allow(dead_code)]
 pub const BENCH_MAGIC: u32 = 0x4553_504e;
 pub const BENCH_HEADER_LEN: usize = 28;
@@ -23,7 +24,7 @@ impl BenchHeader {
     pub fn encode(&self) -> [u8; BENCH_HEADER_LEN] {
         let mut b = [0; BENCH_HEADER_LEN];
         b[0..4].copy_from_slice(&BENCH_MAGIC.to_be_bytes());
-        b[4] = CONTROL_VERSION;
+        b[4] = BENCH_PROTOCOL_VERSION;
         b[5] = self.packet_type;
         b[6..8].copy_from_slice(&self.flags.to_be_bytes());
         b[8..12].copy_from_slice(&self.run_id.to_be_bytes());
@@ -42,7 +43,7 @@ impl BenchHeader {
         if u32::from_be_bytes(b[0..4].try_into()?) != BENCH_MAGIC {
             bail!("bad benchmark magic");
         }
-        if b[4] != CONTROL_VERSION {
+        if b[4] != BENCH_PROTOCOL_VERSION {
             bail!("unsupported benchmark protocol {}", b[4]);
         }
         let packet_len = u16::from_be_bytes(b[14..16].try_into()?);
@@ -168,6 +169,8 @@ mod tests {
         };
         let b = h.encode();
         assert_eq!(&b[0..4], &[0x45, 0x53, 0x50, 0x4e]);
+        assert_eq!(b[4], BENCH_PROTOCOL_VERSION);
+        assert_ne!(BENCH_PROTOCOL_VERSION, CONTROL_VERSION);
         assert_eq!(BenchHeader::decode(&b).unwrap(), h);
     }
     #[test]

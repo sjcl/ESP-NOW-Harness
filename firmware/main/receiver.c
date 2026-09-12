@@ -102,8 +102,10 @@ static void receiver_task(void *argument)
                 if (error == ESP_OK) {
                     metrics_tx_submitted(header.stream_id, event.len, dispatch_us);
                 }
+                if (error != ESP_OK) metrics_tx_api_failure();
+            } else {
+                metrics_tx_slot_timeout();
             }
-            if (error != ESP_OK) metrics_tx_api_failure();
         }
     }
 }
